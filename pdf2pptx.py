@@ -9,6 +9,7 @@ pdf2pptx.py — 將 PDF 轉換為 PPTX 的命令列工具
 
 import argparse
 import io
+import re
 import sys
 from pathlib import Path
 
@@ -88,6 +89,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def parse_pages(spec: str):
+    """解析 --pages 的頁數範圍字串。
+
+    支援「5-12」（第 5 到 12 頁，含頭尾，從 1 起算）與單頁「7」。
+    格式錯誤或起始頁大於結束頁時回傳 None。
+    """
+    match = re.fullmatch(r"(\d+)(?:-(\d+))?", spec.strip())
+    if not match:
+        return None
+    start = int(match.group(1))
+    end = int(match.group(2)) if match.group(2) else start
+    # 頁數從 1 起算，0 為無效；起始頁不可大於結束頁
+    if start < 1 or start > end:
+        return None
+    return (start, end)
+
+
 def default_output_path(input_pdf: str) -> str:
     """未指定 -o 時：與輸入檔同目錄、同檔名，副檔名改為 .pptx。"""
     return str(Path(input_pdf).with_suffix(".pptx"))
@@ -122,10 +140,32 @@ def place_page_image(slide, png_bytes: bytes, img_w: int, img_h: int,
     )
 
 
-def convert(input_pdf: str, output_pptx: str, dpi: int) -> int:
-    """核心轉換：逐頁渲染成 PNG 貼入投影片，回傳轉換的頁數。"""
+def convert(input_pdf: str, output_pptx: str, dpi: int,
+            page_range: tuple[int, int] | None = None) -> int:
+    """核心轉換：逐頁渲染成 PNG 貼入投影片，回傳轉換的頁數。
+
+    page_range 為 (起始頁, 結束頁)，從 1 起算、含頭尾；None 表示全部頁面。
+    範圍完全超出文件頁數時顯示錯誤並以結束碼 1 離開；
+    部分超界時轉換存在的部分並顯示警告。
+    """
     doc = fitz.open(input_pdf)
     try:
+        total_pages = doc.page_count
+        if page_range is None:
+            start, end = 1, total_pages
+        else:
+            start, end = page_range
+            if start > total_pages:
+                # 範圍完全超出文件頁數：視為錯誤，不產生輸出檔
+                print(f"文件僅有 {total_pages} 頁，--pages {start}-{end} 超出範圍",
+                      file=sys.stderr)
+                sys.exit(1)
+            if end > total_pages:
+                # 部分超界：轉換存在的部分並警告
+                end = total_pages
+                print(f"文件僅有 {total_pages} 頁，已轉換第 {start}-{end} 頁")
+
+        # 投影片尺寸依「PDF 第一頁」的長寬比決定
         slide_w_in, slide_h_in = choose_slide_size(doc[0])
 
         prs = Presentation()
@@ -133,7 +173,8 @@ def convert(input_pdf: str, output_pptx: str, dpi: int) -> int:
         prs.slide_height = Emu(int(slide_h_in * EMU_PER_INCH))
         blank_layout = prs.slide_layouts[6]  # 空白版面
 
-        for page in doc:
+        for page_no in range(start - 1, end):
+            page = doc[page_no]
             # 將該頁渲染為 PNG 圖片
             pix = page.get_pixmap(dpi=dpi)
             png_bytes = pix.tobytes("png")
@@ -147,7 +188,7 @@ def convert(input_pdf: str, output_pptx: str, dpi: int) -> int:
                 slide.notes_slide.notes_text_frame.text = text
 
         prs.save(output_pptx)
-        return doc.page_count
+        return end - start + 1
     finally:
         doc.close()
 
@@ -157,8 +198,16 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    # 解析 --pages 頁數範圍（格式錯誤時結束碼 1，不執行轉換）
+    page_range = None
+    if args.pages is not None:
+        page_range = parse_pages(args.pages)
+        if page_range is None:
+            print("--pages 格式錯誤，範例：--pages 5-12", file=sys.stderr)
+            return 1
+
     output_pptx = args.output or default_output_path(args.input_pdf)
-    total = convert(args.input_pdf, output_pptx, args.dpi)
+    total = convert(args.input_pdf, output_pptx, args.dpi, page_range)
     print(f"完成！輸出檔：{output_pptx}（共 {total} 頁）")
     return 0
 
