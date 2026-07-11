@@ -9,8 +9,10 @@ pdf2pptx.py — 將 PDF 轉換為 PPTX 的命令列工具
 
 import argparse
 import io
+import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import fitz  # PyMuPDF：負責 PDF 解析與頁面渲染
@@ -89,6 +91,29 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def fail(message: str) -> None:
+    """顯示錯誤訊息（繁體中文）後，以結束碼 1 結束程式。"""
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def open_pdf(input_pdf: str) -> "fitz.Document":
+    """開啟 PDF 並檢查 2.4 節定義的輸入錯誤情境。"""
+    if not Path(input_pdf).is_file():
+        fail(f"找不到檔案：{input_pdf}")
+    try:
+        doc = fitz.open(input_pdf)
+    except Exception:
+        fail("無法讀取 PDF，請確認檔案格式")
+    if not doc.is_pdf:
+        doc.close()
+        fail("無法讀取 PDF，請確認檔案格式")
+    if doc.needs_pass:
+        doc.close()
+        fail("此 PDF 受密碼保護，暫不支援")
+    return doc
+
+
 def parse_pages(spec: str):
     """解析 --pages 的頁數範圍字串。
 
@@ -148,7 +173,7 @@ def convert(input_pdf: str, output_pptx: str, dpi: int,
     範圍完全超出文件頁數時顯示錯誤並以結束碼 1 離開；
     部分超界時轉換存在的部分並顯示警告。
     """
-    doc = fitz.open(input_pdf)
+    doc = open_pdf(input_pdf)
     try:
         total_pages = doc.page_count
         if page_range is None:
@@ -157,9 +182,7 @@ def convert(input_pdf: str, output_pptx: str, dpi: int,
             start, end = page_range
             if start > total_pages:
                 # 範圍完全超出文件頁數：視為錯誤，不產生輸出檔
-                print(f"文件僅有 {total_pages} 頁，--pages {start}-{end} 超出範圍",
-                      file=sys.stderr)
-                sys.exit(1)
+                fail(f"文件僅有 {total_pages} 頁，--pages {start}-{end} 超出範圍")
             if end > total_pages:
                 # 部分超界：轉換存在的部分並警告
                 end = total_pages
@@ -173,7 +196,10 @@ def convert(input_pdf: str, output_pptx: str, dpi: int,
         prs.slide_height = Emu(int(slide_h_in * EMU_PER_INCH))
         blank_layout = prs.slide_layouts[6]  # 空白版面
 
-        for page_no in range(start - 1, end):
+        convert_total = end - start + 1
+        for i, page_no in enumerate(range(start - 1, end), 1):
+            # 顯示轉換進度：[n/總數] 轉換中…
+            print(f"[{i}/{convert_total}] 轉換中…", flush=True)
             page = doc[page_no]
             # 將該頁渲染為 PNG 圖片
             pix = page.get_pixmap(dpi=dpi)
@@ -187,8 +213,19 @@ def convert(input_pdf: str, output_pptx: str, dpi: int,
             if text:
                 slide.notes_slide.notes_text_frame.text = text
 
-        prs.save(output_pptx)
-        return end - start + 1
+        # 先寫入暫存檔再改名，確保任何錯誤都不會留下不完整的輸出檔
+        tmp_path = output_pptx + ".tmp"
+        try:
+            prs.save(tmp_path)
+            os.replace(tmp_path, output_pptx)
+        except OSError:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            fail(f"無法寫入輸出檔：{output_pptx}")
+        return convert_total
     finally:
         doc.close()
 
@@ -207,8 +244,11 @@ def main(argv=None) -> int:
             return 1
 
     output_pptx = args.output or default_output_path(args.input_pdf)
+    start_time = time.perf_counter()
     total = convert(args.input_pdf, output_pptx, args.dpi, page_range)
-    print(f"完成！輸出檔：{output_pptx}（共 {total} 頁）")
+    elapsed = time.perf_counter() - start_time
+    # 全部完成：顯示輸出檔路徑、總頁數、總耗時（秒）
+    print(f"完成！輸出檔：{output_pptx}（共 {total} 頁，耗時 {elapsed:.1f} 秒）")
     return 0
 
 
