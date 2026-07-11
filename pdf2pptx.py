@@ -141,6 +141,11 @@ def convert(input_pdf: str, output_pptx: str, dpi: int) -> int:
             place_page_image(slide, png_bytes, pix.width, pix.height,
                              slide_w_in, slide_h_in)
 
+            # 抽取該頁文字（保留段落換行）寫入演講者備忘稿；無文字時留空
+            text = page.get_text("text").rstrip()
+            if text:
+                slide.notes_slide.notes_text_frame.text = text
+
         prs.save(output_pptx)
         return doc.page_count
     finally:
