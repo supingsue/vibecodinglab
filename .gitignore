@@ -1,0 +1,8 @@
+# Python 快取與測試產物
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 轉換輸出與暫存檔
+*.pptx
+*.pptx.tmp
